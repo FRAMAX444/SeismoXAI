@@ -1,0 +1,4 @@
+.venv
+dset
+__pycache__/
+preprocessed_dset
