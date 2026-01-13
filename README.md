@@ -38,8 +38,6 @@ Create a virtual environment (recommended) and install dependencies:
 pip install -r requirements.txt
 ```
 
-> **Important**: Do **not** name any file `shap.py`, otherwise it will shadow the SHAP package.
-
 ---
 
 ## 1. Data Preparation (Preprocessing)
