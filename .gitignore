@@ -1,4 +1,10 @@
 .venv
 dset
 __pycache__/
-preprocessed_dset
+preprocessed_dset/
+correctly_predicted_samples/
+figures/
+shap_values_multimodel/
+shap_values_singlemodel/
+trained_models/
+trained_models_multimodels/

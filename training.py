@@ -511,3 +511,257 @@ class Training:
         std = np.sqrt(var)
 
         return mean.astype(np.float32), std.astype(np.float32)
+
+    def train_one_model_multi_stations(
+        self,
+        input_dir,
+        output_dir,
+        stations=None,  # None => all; otherwise list of station folder names
+        model_name=None,
+        save_models=True,
+        save_results=True,
+    ):
+        """
+        Traina UNA sola CNN su un sottoinsieme di stazioni.
+        - stations=None => tutte le stazioni
+        - stations=['AAA','BBB'] => solo quelle stazioni (nomi cartelle)
+        """
+        input_dir = Path(input_dir)
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        station_dirs = self._discover_station_dirs(input_dir)
+        if not station_dirs:
+            raise FileNotFoundError(
+                "No station folders found. Expected station folders containing train/ and test/."
+            )
+
+        # -------------------------
+        # Filter stations if provided
+        # -------------------------
+        all_by_name = {p.name: p for p in station_dirs}
+
+        if stations is None:
+            selected_dirs = station_dirs
+            selected_names = [p.name for p in station_dirs]
+        else:
+            if isinstance(stations, str):
+                stations = [stations]
+            requested = list(stations)
+            missing = [s for s in requested if s not in all_by_name]
+            if missing:
+                available = sorted(all_by_name.keys())
+                raise ValueError(
+                    "Some requested stations were not found:\n"
+                    f"  missing: {missing}\n"
+                    f"  available: {available}"
+                )
+            selected_dirs = [all_by_name[s] for s in requested]
+            selected_names = requested
+
+        if model_name is None:
+            model_name = "MODEL_" + "_".join(selected_names)
+
+        # -------------------------
+        # Check train/test folders and input_dim consistency
+        # -------------------------
+        dims = {}
+        for st_dir in selected_dirs:
+            st = st_dir.name
+
+            if not (st_dir / "train").exists() or not (st_dir / "test").exists():
+                raise FileNotFoundError(
+                    f"Station '{st}' is missing 'train/' or 'test/' folders: {st_dir}"
+                )
+
+            dim_path = st_dir / "input_dim.npy"
+            if not dim_path.exists():
+                raise FileNotFoundError(f"Missing input_dim.npy for station '{st}': {dim_path}")
+
+            h, w = np.load(dim_path).astype(int).tolist()
+            dims[st] = (int(h), int(w))
+
+        uniq_dims = sorted(set(dims.values()))
+        if len(uniq_dims) != 1:
+            msg = "Input dimensions are NOT consistent across selected stations:\n"
+            for st, d in sorted(dims.items()):
+                msg += f"  - {st}: {d}\n"
+            msg += f"Unique dims found: {uniq_dims}\n"
+            raise ValueError(msg)
+
+        input_dim = uniq_dims[0]
+
+        # -------------------------
+        # Collect global train/test files for selected stations
+        # -------------------------
+        all_train_files, all_test_files = [], []
+        for st_dir in selected_dirs:
+            all_train_files.extend(self._list_pngs(st_dir / "train"))
+            all_test_files.extend(self._list_pngs(st_dir / "test"))
+
+        if len(all_train_files) == 0 or len(all_test_files) == 0:
+            raise ValueError(
+                f"Empty dataset for selected stations: train_files={len(all_train_files)} test_files={len(all_test_files)}"
+            )
+
+        # -------------------------
+        # Compute global mean/std on TRAIN ONLY (selected stations)
+        # -------------------------
+        mean, std = self._compute_streaming_mean_std(
+            all_train_files, max_images=self.max_images_for_stats
+        )
+
+        # -------------------------
+        # Output folders
+        # -------------------------
+        models_root = output_dir / "models"
+        results_root = output_dir / "results"
+        if save_models:
+            models_root.mkdir(parents=True, exist_ok=True)
+        if save_results:
+            results_root.mkdir(parents=True, exist_ok=True)
+
+        model_out_dir = None
+        results_out_dir = None
+
+        if save_models:
+            model_out_dir = models_root / model_name
+            model_out_dir.mkdir(parents=True, exist_ok=True)
+
+            (model_out_dir / "stats.json").write_text(
+                json.dumps({"mean": mean.tolist(), "std": std.tolist()}, indent=2)
+            )
+            (model_out_dir / "run_config.json").write_text(json.dumps({
+                "model_name": model_name,
+                "stations": selected_names,
+                "input_dim": [input_dim[0], input_dim[1]],
+                "lr": self.lr,
+                "dropout": self.dropout,
+                "batch_size": self.batch_size,
+                "max_epochs": self.max_epochs,
+                "patience": self.patience,
+                "num_workers": self.num_workers,
+                "max_images_for_stats": self.max_images_for_stats,
+                "train_files": len(all_train_files),
+                "test_files": len(all_test_files),
+            }, indent=2))
+
+        if save_results:
+            results_out_dir = results_root / model_name
+            results_out_dir.mkdir(parents=True, exist_ok=True)
+
+        # -------------------------
+        # Dataloaders
+        # -------------------------
+        tfm = transforms.Compose([
+            transforms.Resize(input_dim),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean.tolist(), std=std.tolist()),
+        ])
+
+        train_ds = FolderSpectrogramDataset(all_train_files, transform=tfm)
+        test_ds = FolderSpectrogramDataset(all_test_files, transform=tfm)
+
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
+            persistent_workers=False,
+        )
+        test_loader = DataLoader(
+            test_ds,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
+            persistent_workers=False,
+        )
+
+        # -------------------------
+        # Model + Trainer
+        # -------------------------
+        model = CNN2D(input_dim=input_dim, n_classes=2, lr=self.lr, dropout=self.dropout)
+
+        callbacks = []
+        logger = None
+        ckpt = None
+
+        if save_models:
+            ckpt = ModelCheckpoint(
+                dirpath=str(model_out_dir),
+                filename="best",
+                monitor="val_loss",
+                mode="min",
+                save_top_k=1,
+                save_last=True
+            )
+            callbacks.append(ckpt)
+            callbacks.append(EarlyStopping(monitor="val_loss", mode="min", patience=self.patience, verbose=True))
+            logger = CSVLogger(save_dir=str(model_out_dir), name="logs")
+
+        if self.verbose:
+            print("\n===== TRAIN ONE MODEL ON SELECTED STATIONS =====")
+            print("Stations:", selected_names)
+            print(f"Global train_files={len(all_train_files)} | test_files={len(all_test_files)} | input_dim={input_dim}")
+
+        trainer = pl.Trainer(
+            max_epochs=self.max_epochs,
+            accelerator="auto",
+            devices="auto",
+            deterministic=True,
+            log_every_n_steps=10,
+            callbacks=callbacks if callbacks else None,
+            logger=logger
+        )
+
+        trainer.fit(model, train_loader, test_loader)
+
+        # -------------------------
+        # Evaluate best checkpoint (if available) else last weights
+        # -------------------------
+        best_ckpt_path = None
+        eval_model = model
+
+        if save_models and ckpt is not None and ckpt.best_model_path:
+            best_ckpt_path = ckpt.best_model_path
+            eval_model = CNN2D.load_from_checkpoint(
+                best_ckpt_path,
+                input_dim=input_dim,
+                n_classes=2,
+                lr=self.lr,
+                dropout=self.dropout
+            )
+
+        conf_torch = self._run_test_and_get_confusion(eval_model, test_loader)
+        self._print_confusion_matrix(model_name, conf_torch)
+
+        if save_results:
+            cm_path = results_out_dir / "confusion_matrix.png"
+            self._save_confusion_matrix_png(model_name, conf_torch, cm_path)
+
+            metrics = self._metrics_from_confusion(conf_torch)
+            metrics_path = results_out_dir / "metrics.json"
+            payload = {
+                "model_name": model_name,
+                "stations": selected_names,
+                "best_checkpoint": best_ckpt_path,
+                "input_dim": [input_dim[0], input_dim[1]],
+                "test_files": len(all_test_files),
+                "confusion_matrix": conf_torch.tolist(),
+                "metrics": metrics,
+            }
+            metrics_path.write_text(json.dumps(payload, indent=2))
+
+            if self.verbose:
+                print(f"[OK] results saved: {cm_path} and {metrics_path}")
+
+        if save_models and self.verbose:
+            print(f"[DONE] model saved in {model_out_dir} (best={best_ckpt_path})")
+
+        # Cleanup
+        del trainer, model, eval_model, train_loader, test_loader, train_ds, test_ds
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
