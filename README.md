@@ -1,4 +1,4 @@
-# SeismoXAI
+![SeismoXAI Header](media/header.png)
 
 End‑to‑end pipeline for **foreshock vs aftershock classification** from seismic waveforms using CNNs, with **SHAP‑based explainability** on time–frequency representations.
 
