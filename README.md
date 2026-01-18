@@ -79,7 +79,7 @@ pp = Preprocessing(
 
 pp.make_dset(
     input_dir="raw_data",
-    output_dir="preprocessed_dset1"
+    output_dir="preprocessed_dset"
 )
 ```
 
@@ -123,7 +123,7 @@ trainer = Training(
 )
 
 trainer.train(
-    input_dir="preprocessed_dset1",
+    input_dir="preprocessed_dset",
     output_dir="trained_models",
     save_models=True,
     save_results=True
@@ -166,7 +166,7 @@ from shap_explainer import SHAPExplainer
 
 explainer = SHAPExplainer(
     trained_models_dir="trained_models/models",
-    preprocessed_dir="preprocessed_dset1",
+    preprocessed_dir="preprocessed_dset",
     correct_samples_dir="trained_models_correct_test_samples",
     verbose=True
 )
