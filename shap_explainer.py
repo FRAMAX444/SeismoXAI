@@ -907,3 +907,90 @@ class SHAPExplainer:
                 print(f"[OK] figure saved to: {save_path.resolve()}")
 
         plt.show()
+
+    def compute_mean_of_saved_shap_averages(
+        self,
+        stations,
+        input_path,           # ROOT shap output (dove stanno gli avg_p_*.npy)
+        output_path,          # dove salvare la media finale
+        ext="npy",
+        overwrite=True,
+        skip_missing=True,
+        verbose=True,
+    ):
+        """
+        Media degli SHAP averages salvati (avg_p_pre / avg_p_post) su più stazioni.
+
+        Legge da:
+        <input_path>/<STATION>/foreshock/avg_p_pre.npy
+        <input_path>/<STATION>/aftershock/avg_p_post.npy
+
+        Scrive in:
+        <output_path>/foreshock/avg_p_pre_mean.npy
+        <output_path>/aftershock/avg_p_post_mean.npy
+
+        Parametri:
+        - stations: iterable di station names
+        - input_path: root dove sono salvati gli shap averages per stazione
+        - output_path: root dove salvare la media finale
+        - skip_missing: se True, ignora stazioni senza file (altrimenti error)
+        """
+        input_path = Path(input_path)
+        output_path = Path(output_path)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        classes = ["foreshock", "aftershock"]
+        results = {}
+
+        used_counts = {"foreshock": 0, "aftershock": 0}
+
+        for cls in classes:
+            maps = []
+            for st in stations:
+                try:
+                    ten = self.load_mean_shap_tensor_new(input_path, cls, st, ext=ext)
+                    ten = self.ensure_2d_local(ten, name=f"{cls}-{st}")
+                    maps.append(ten)
+                except FileNotFoundError:
+                    if not skip_missing:
+                        raise
+                    if verbose:
+                        print(f"[SKIP] missing avg for {st} | {cls}")
+                except Exception as e:
+                    if not skip_missing:
+                        raise
+                    if verbose:
+                        print(f"[SKIP] error reading {st} | {cls}: {e}")
+
+            if len(maps) == 0:
+                if verbose:
+                    print(f"[WARN] no maps collected for class: {cls}")
+                results[cls] = None
+                continue
+
+            # controllo shape coerenti
+            shapes = {m.shape for m in maps}
+            if len(shapes) != 1:
+                raise ValueError(f"Shape mismatch for {cls}: {shapes}")
+
+            mean_map = np.mean(np.stack(maps, axis=0), axis=0)
+            results[cls] = mean_map
+            used_counts[cls] = len(maps)
+
+            # salva
+            out_dir = output_path / cls
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            out_name = "avg_p_pre_mean.npy" if cls == "foreshock" else "avg_p_post_mean.npy"
+            out_file = out_dir / out_name
+
+            if overwrite or not out_file.exists():
+                np.save(out_file, mean_map)
+
+            if verbose:
+                print(f"[OK] saved {cls} mean -> {out_file} | shape={mean_map.shape} | n={len(maps)}")
+
+        if verbose:
+            print(f"[DONE] used maps counts: foreshock={used_counts['foreshock']}, aftershock={used_counts['aftershock']}")
+
+        return results, used_counts
